@@ -1,7 +1,8 @@
 import re
 from parsimonious.grammar import Grammar
-from django.db.models import Q, F, Value
-from django.db.models.functions import Concat
+from django.db import models
+from django.db.models import functions
+from operator import and_, or_
 
 
 class ODataException(Exception):
@@ -12,15 +13,15 @@ def django_params(param_dict):
     rv = {}
     processor = FilterProcessor()
     if '$filter' in param_dict:
-        rv['filter'] = processor.process(param_dict['$filter'][0])
+        rv.update(processor.process(param_dict['$filter'][0]))
     if '$orderby' in param_dict:
-        rv['orderby'] = processor.order_by(param_dict['$orderby'][0])
+        rv.update(processor.order_by(param_dict['$orderby'][0]))
     if '$select' in param_dict:
-        rv['select'] = processor.select(param_dict['$select'][0])
+        rv.update(processor.select(param_dict['$select'][0]))
     if '$top' in param_dict:
-        rv['top'] = slice(None, int(param_dict['$top'][0]))
+        rv.update(top=slice(None, int(param_dict['$top'][0])))
     if '$skip' in param_dict:
-        rv['skip'] = slice(int(param_dict['$skip'][0]), None)
+        rv.update(skip=slice(int(param_dict['$skip'][0]), None))
     return rv
 
 
@@ -72,12 +73,12 @@ def walk(parsed, node_type='bool_common_expr'):
 
 
 class FilterProcessor:
-    def __init__(self):
-        self.field_mapper = lambda x: x.replace("/", "__") if isinstance(x, str) else "__".join(x)
-        self.Q = Q
-        self.F = F
-        self.Value = Value
-        self.Concat = Concat
+    @staticmethod
+    def field_mapper(field):
+        if isinstance(field, list):
+            return "__".join(field)
+        if isinstance(field, str):
+            return field.replace("/", "__")
 
     def order_by(self, order_param):
         terms = order_param.split(',')
@@ -88,7 +89,7 @@ class FilterProcessor:
             if direction and direction[0] == 'desc':
                 ordering = '-%s' % ordering
             final.append(ordering)
-        return final
+        return {"orderby": final}
 
     @staticmethod
     def select(select_param):
@@ -97,7 +98,7 @@ class FilterProcessor:
         for t in terms:
             term = t.strip().replace("/", "__")
             final.append(term)
-        return final
+        return {"select": final}
 
     def process(self, filter_text):
         parsed = grammar.parse(filter_text)
@@ -119,11 +120,33 @@ class FilterProcessor:
         return q_expr
 
     @staticmethod
+    def merge_dicts(dict_a: dict, dict_b: dict, op):
+        dict_result = {}
+        if dict_b:
+            keys = set(dict_a.keys()) & set(dict_b.keys())
+            for key in keys:
+                dict_result[key] = op(dict_a[key], dict_b[key])
+        for key in dict_a:
+            if key not in dict_result:
+                if op == 'not':
+                    dict_result[key] = ~dict_a[key]
+                else:
+                    dict_result[key] = dict_a[key]
+        if dict_b:
+            for key in dict_b:
+                if key not in dict_result:
+                    if op == "not":
+                        dict_result[key] = ~dict_b[key]
+                    else:
+                        dict_result[key] = dict_b[key]
+        return dict_result
+
+    @staticmethod
     def bool_combine(left_expr, op, right_expr=None):
         ops = {
-            'not': lambda a, b: ~a,
-            'and': lambda a, b: a & b,
-            'or': lambda a, b: a | b
+            'not': lambda a, b=None: FilterProcessor.merge_dicts(a, b, "not"),
+            'and': lambda a, b: FilterProcessor.merge_dicts(a, b, and_),
+            'or': lambda a, b: FilterProcessor.merge_dicts(a, b, or_)
         }
         return ops[op](left_expr, right_expr)
 
@@ -179,10 +202,10 @@ class FilterProcessor:
             if op in ('le', 'ge'):
                 op = op[0] + 'te'
             token = '{}__{}'.format(token, op)
-        q_expr = self.Q(**{token: value})
+        q_expr = models.Q(**{token: value})
         if op == 'ne':
             q_expr = ~q_expr
-        return q_expr
+        return {"filter": q_expr}
 
     def basic_function(self, func_name, fields, *args, params=None):
         converter_a = {
@@ -199,8 +222,8 @@ class FilterProcessor:
             "second": "second"
         }
         converter_b = {
-            "string": lambda n: self.Value(n.text.strip("'")),
-            "select_path": lambda n: self.F(n.text.strip("'")),
+            "string": lambda n: models.Value(n.text.strip("'")),
+            "select_path": lambda n: models.F(n.text.strip("'")),
             "function_expr": self.function_expr
         }
         converted_value = converter_a.get(func_name)
@@ -208,11 +231,13 @@ class FilterProcessor:
             token = self.field_mapper(fields)
             token = f"{token}__{converted_value}"
             if not args:
-                return token
-            return self.Q(**{token: args[0]})
+                return {"filter": token}
+            return {"filter": models.Q(**{token: args[0]})}
         if func_name == 'concat':
             try:
-                return self.Concat(*[converter_b[i.expr_name](i) for i in params])
+                params = [converter_b[i.expr_name](i) for i in params]
+                params = [i['filter'] if isinstance(i, dict) else i for i in params]
+                return {"filter": functions.Concat(*params)}
             except KeyError as ke:
                 raise ODataException(f"type {ke} is not support for function concat")
 
@@ -226,8 +251,11 @@ class FilterProcessor:
     def function_marker_expr(self, node):
         func_name, *params = walk(node, 'function_marker_expr')
         func_result = self.function_expr(func_name)
-        if isinstance(func_result, str):
-            op, value = [self.primitive(i) for i in params]
-            return self.basic_relation([func_result], op, value)
+        op, value = [self.primitive(i) for i in params]
+        if isinstance(func_result['filter'], str):
+            return self.basic_relation(func_result['filter'], op, value)
         else:
-            pass  # TODO
+            result = {"defer": "annotated_value"}
+            result.update(self.basic_relation(["annotated_value"], op, value))
+            result.update(annotate={"annotated_value": func_result['filter']})
+            return result
