@@ -233,6 +233,67 @@ FILTER_TESTS = [
             "defer": "annotated_value"
         }
     ),
+    (
+        "$filter=" + quote("concat(filed_A, filed_B, 'value_B')"),
+        {"filter": functions.Concat(models.F('filed_A'), models.F('filed_B'), models.Value("value_B"))}
+    ),
+    (
+        "$filter=" + quote("not(Name eq 'John')"),
+        {"filter": ~models.Q(Name="John")}
+    ),
+    (
+        "$filter=" + quote("concat(concat(City,', '), Country) eq 'Berlin, Germany'"),
+        {
+            "annotate": {
+                "annotated_value": functions.Concat(
+                    functions.Concat(models.F('City'), models.Value(', ')),
+                    models.F("Country")
+                )
+            },
+            "filter": models.Q(annotated_value="Berlin, Germany"),
+            "defer": "annotated_value"
+        }
+    ),
+    (
+        "$filter=" + quote("tolower(CompanyName) eq 'alfreds futterkists'"),
+        {"filter": models.Q(CompanyName__lower='alfreds futterkists')}
+    ),
+    (
+        "$filter=" + quote("toupper(CompanyName) eq 'ALFRED FUTERKISTS'"),
+        {"filter": models.Q(CompanyName__upper='ALFRED FUTERKISTS')}
+    ),
+    (
+        "$filter=" + quote("trim(CompanyName) eq 'Alfred Futerkists'"),
+        {"filter": models.Q(CompanyName__trim='Alfred Futerkists')}
+    ),
+    (
+        "$filter=" + quote("tolower(trim(CompanyName)) eq 'alfred futerkists'"),
+        {"filter": models.Q(CompanyName__trim__lower='alfred futerkists')}
+    ),
+    (
+        "$filter=" + quote("toupper(trim(CompanyName)) eq 'ALFRED FUTERKISTS'"),
+        {"filter": models.Q(CompanyName__trim__upper='ALFRED FUTERKISTS')}
+    ),
+    (
+        "$filter=" + quote("trim(toupper(CompanyName)) eq 'ALFRED FUTERKISTS'"),
+        {"filter": models.Q(CompanyName__upper__trim='ALFRED FUTERKISTS')}
+    ),
+    (
+        "$filter=" + quote("ceiling(Freight) eq 32"),
+        {"filter": models.Q(Freight__ceil=32)}
+    ),
+    (
+        "$filter=" + quote("floor(Freight) eq 32"),
+        {"filter": models.Q(Freight__floor=32)}
+    ),
+    (
+        "$filter=" + quote("round(Freight) eq 32"),
+        {"filter": models.Q(Freight__round=32)}
+    ),
+    (
+        "$filter=" + quote("Price add 2.45 eq 5.00"),
+        {}
+    ),
 ]
 ORDER_TESTS = [
     (
@@ -266,6 +327,9 @@ SKIP_TESTS = [
     ("$skip=100", {"skip": slice(100, None)}),
     ("$skip=50", {"skip": slice(50, None)}),
 ]
+EXPAND_TEST = [
+
+]
 
 
 class OdataTest(TestCase):
@@ -298,3 +362,7 @@ class OdataTest(TestCase):
             param_dict = parse_qs(t[0])
             result = django_params(param_dict)
             self.assertEqual(result, t[1], msg=t[0])
+
+    def test_expand(self):
+        for t in EXPAND_TEST:
+            param_dict = parse_qs(t[0])
