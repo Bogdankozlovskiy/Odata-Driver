@@ -2,7 +2,7 @@ import re
 from parsimonious.grammar import Grammar
 from django.db import models
 from django.db.models import functions
-from operator import and_, or_
+import operator
 
 
 class ODataException(Exception):
@@ -22,28 +22,32 @@ def django_params(param_dict):
         rv.update(top=slice(None, int(param_dict['$top'][0])))
     if '$skip' in param_dict:
         rv.update(skip=slice(int(param_dict['$skip'][0]), None))
+    if '$expand' in param_dict:
+        rv.update(processor.expand(param_dict['$expand'][0]))
     return rv
 
 
 grammar = Grammar(
     """
     bool_common_expr     = (not_expr / common_expr ) ( and_expr / or_expr )?
-    rel_expr            = (function_param / function_expr) RWS rel_marker RWS function_param
-    rel_marker          = 'eq' / 'ne' / 'lt' / 'le' / 'gt' / 'ge'
-    common_expr         = paren_expr / function_marker_expr / function_expr / rel_expr
-    function_marker_expr = function_expr RWS rel_marker RWS (string / number)
-    function_expr       = func_name "(" ~"\s*" function_param  (~"\s*,\s*" function_param)* ~"\s*" ")"
-    func_name           = ~"\w+"
-    select_path         = ~"[a-zA-Z][\w/]*"
-    number             = "-"? ~"[\d\.]+"
-    string             = "'" ~"[^']+" "'"
-    json_primitive      = "true" / "false" / "null"
-    function_param      = function_expr / number / string / json_primitive / select_path
-    paren_expr          = "(" ~"\s*" bool_common_expr ~"\s*" ")"
-    not_expr            = 'not' RWS? bool_common_expr?
-    and_expr            = RWS 'and' RWS bool_common_expr
-    or_expr             = RWS 'or' RWS bool_common_expr
-    RWS                = ~"\s+"
+    rel_expr             = (function_param / function_expr) RWS rel_marker RWS function_param 
+    math_expr            = function_param RWS math_marker RWS number
+    rel_marker           = 'eq' / 'ne' / 'lt' / 'le' / 'gt' / 'ge'
+    common_expr          = paren_expr / function_marker_expr / function_expr / rel_expr
+    function_marker_expr = (function_expr / math_expr) RWS rel_marker RWS (string / number)
+    function_expr        = func_name "(" ~"\s*" function_param  (~"\s*,\s*" function_param)* ~"\s*" ")"
+    func_name            = ~"\w+"
+    select_path          = ~"[a-zA-Z][\w/]*"
+    number               = "-"? ~"[\d\.]+"
+    string               = "'" ~"[^']+" "'"
+    json_primitive       = "true" / "false" / "null"
+    function_param       = function_expr / number / string / json_primitive / select_path
+    paren_expr           = "(" ~"\s*" bool_common_expr ~"\s*" ")"
+    not_expr             = 'not' RWS? bool_common_expr?
+    math_marker          = 'mod' / 'div' / 'mul' / 'sub' / 'add' / 'sqrt'
+    and_expr             = RWS 'and' RWS bool_common_expr
+    or_expr              = RWS 'or' RWS bool_common_expr
+    RWS                  = ~"\s+"
     """
 )
 
@@ -52,12 +56,13 @@ good_children = {
     'bool_common_expr': ['not_expr', 'common_expr', 'and_expr', 'or_expr'],
     'common_expr': ['paren_expr', 'function_marker_expr', 'function_expr', 'rel_expr'],
     'function_expr': ['func_name', 'function_expr'] + function_param,
-    'function_marker_expr': ['func_name', 'rel_marker', 'function_expr'] + function_param,
+    'function_marker_expr': ['func_name', 'rel_marker', 'function_expr', 'math_expr'] + function_param,
     'rel_expr': ['rel_marker', 'function_expr'] + function_param,
     'paren_expr': ['bool_common_expr'],
     'or_expr': ['bool_common_expr'],
     'and_expr': ['bool_common_expr'],
     'not_expr': ['bool_common_expr'],
+    'math_expr': ['math_marker'] + function_param,
 }
 
 
@@ -85,6 +90,15 @@ class FilterProcessor:
     def process(self, filter_text):
         parsed = grammar.parse(filter_text)
         return self.bool_common_expr(parsed)
+
+    @staticmethod
+    def expand(expand_param):
+        terms = expand_param.split(',')
+        final = []
+        for t in terms:
+            term = t.strip().replace("/", "__")
+            final.append(term)
+        return {"expand": final}
 
     @staticmethod
     def field_mapper(field):
@@ -122,31 +136,23 @@ class FilterProcessor:
     @staticmethod
     def merge_dicts(dict_a: dict, dict_b: dict, op):
         dict_result = {}
-        if dict_b:
-            keys = set(dict_a.keys()) & set(dict_b.keys())
-            for key in keys:
-                dict_result[key] = op(dict_a[key], dict_b[key])
+        keys = set(dict_a.keys()) & set(dict_b.keys())
+        for key in keys:
+            dict_result[key] = op(dict_a[key], dict_b[key])
         for key in dict_a:
             if key not in dict_result:
-                if op == 'not':
-                    dict_result[key] = ~dict_a[key]
-                else:
-                    dict_result[key] = dict_a[key]
-        if dict_b:
-            for key in dict_b:
-                if key not in dict_result:
-                    if op == "not":
-                        dict_result[key] = ~dict_b[key]
-                    else:
-                        dict_result[key] = dict_b[key]
+                dict_result[key] = dict_a[key]
+        for key in dict_b:
+            if key not in dict_result:
+                dict_result[key] = dict_b[key]
         return dict_result
 
     @staticmethod
     def bool_combine(left_expr, op, right_expr=None):
         ops = {
-            'not': lambda a, b=None: FilterProcessor.merge_dicts(a, b, "not"),
-            'and': lambda a, b: FilterProcessor.merge_dicts(a, b, and_),
-            'or': lambda a, b: FilterProcessor.merge_dicts(a, b, or_)
+            'not': lambda a, b: {"filter": ~a['filter']},
+            'and': lambda a, b: FilterProcessor.merge_dicts(a, b, operator.and_),
+            'or': lambda a, b: FilterProcessor.merge_dicts(a, b, operator.or_)
         }
         return ops[op](left_expr, right_expr)
 
@@ -190,6 +196,8 @@ class FilterProcessor:
             return self.function_expr(node)['filter']
         elif node.expr_name == "rel_marker":
             return node.text
+        elif node.expr_name == "math_marker":
+            return node.text
         raise ODataException("unmatched primitive type '{}'".format(node.text))
 
     def basic_relation(self, fields, op, value):
@@ -209,7 +217,7 @@ class FilterProcessor:
     def basic_function(self, func_name, fields, *args, params=None):
         converter_a = {
             "contains": "contains",
-            "substringof": "contains",
+            "substringof": "contains",  # TODO substringof works works not like contains
             "endswith": "endswith",
             "startswith": "startswith",
             "length": "length",
@@ -225,6 +233,10 @@ class FilterProcessor:
             "ceiling": "ceil",
             "floor": "floor",
             "round": "round",
+            "power": "power",        # TODO write the test for this
+            "sqtr": "sqtr",          # TODO write the test for this
+            "abs": "abs",            # TODO write the test for this
+            "mod": "mod"             # TODO write the test for this
         }
         converter_b = {
             "string": lambda n: models.Value(n.text.strip("'")),
@@ -248,14 +260,24 @@ class FilterProcessor:
 
     def function_expr(self, node):
         func_name, *params = FilterProcessor.walk(node, 'function_expr')
-        param_vals = [(p.text.split('/') if p.expr_name == 'select_path'
-                       else self.primitive(p))
-                      for p in params]
+        param_vals = [(p.text.split('/') if p.expr_name == 'select_path' else self.primitive(p)) for p in params]
         return self.basic_function(func_name.text, *param_vals, params=params)
+
+    def math_expr(self, node):
+        func_name, *params = FilterProcessor.walk(node, 'math_expr')
+        op, val = [(p.text.split('/') if p.expr_name == 'select_path' else self.primitive(p)) for p in params]
+        if op == "div":
+            op = "truediv"
+        return {"filter": getattr(operator, op)(models.F(func_name.text), val)}
 
     def function_marker_expr(self, node):
         func_name, *params = FilterProcessor.walk(node, 'function_marker_expr')
-        func_result = self.function_expr(func_name)
+        if func_name.expr_name == "function_expr":
+            func_result = self.function_expr(func_name)
+        elif func_name.expr_name == "math_expr":
+            func_result = self.math_expr(func_name)
+        else:
+            raise ODataException(f"function_marker_expr doesn't support type {func_name.expr_name}")
         op, value = [self.primitive(i) for i in params]
         if isinstance(func_result['filter'], str):
             return self.basic_relation(func_result['filter'], op, value)

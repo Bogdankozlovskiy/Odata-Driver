@@ -292,7 +292,59 @@ FILTER_TESTS = [
     ),
     (
         "$filter=" + quote("Price add 2.45 eq 5.00"),
-        {}
+        {
+            'defer': 'annotated_value',
+            "filter": models.Q(annotated_value=5.0),
+            "annotate": {"annotated_value": models.F("Price") + 2.45}
+        }
+    ),
+    (
+        "$filter=" + quote("Price sub 0.55 eq 2.00"),
+        {
+            'defer': 'annotated_value',
+            "filter": models.Q(annotated_value=2.0),
+            "annotate": {"annotated_value": models.F("Price") - 0.55}
+        }
+    ),
+    (
+        "$filter=" + quote("Price mul 2.0 eq 5.10"),
+        {
+            'defer': 'annotated_value',
+            "filter": models.Q(annotated_value=5.10),
+            "annotate": {"annotated_value": models.F("Price") * 2.0}
+        }
+    ),
+    (
+        "$filter=" + quote("Price div 2.55 eq 1"),
+        {
+            'defer': 'annotated_value',
+            "filter": models.Q(annotated_value=1),
+            "annotate": {"annotated_value": models.F("Price") / 2.55}
+        }
+    ),
+    (
+        "$filter=" + quote("Rating div 2 eq 2"),
+        {
+            'defer': 'annotated_value',
+            "filter": models.Q(annotated_value=2),
+            "annotate": {"annotated_value": models.F("Rating") / 2}
+        }
+    ),
+    (
+        "$filter=" + quote("Rating div 2 eq 2.5"),
+        {
+            'defer': 'annotated_value',
+            "filter": models.Q(annotated_value=2.5),
+            "annotate": {"annotated_value": models.F("Rating") / 2}
+        }
+    ),
+    (
+        "$filter=" + quote("Rating mod 5 eq 0"),
+        {
+            'defer': 'annotated_value',
+            "filter": models.Q(annotated_value=0),
+            "annotate": {"annotated_value": models.F("Rating") % 5}
+        }
     ),
 ]
 ORDER_TESTS = [
@@ -328,7 +380,18 @@ SKIP_TESTS = [
     ("$skip=50", {"skip": slice(50, None)}),
 ]
 EXPAND_TEST = [
-
+    (
+        "$expand=" + quote("Products"),
+        {"expand": ["Products"]}
+    ),
+    (
+        "$expand=" + quote("Products/Suppliers"),
+        {"expand": ["Products__Suppliers"]}
+    ),
+    (
+        "$expand=" + quote("Category,Suppliers"),
+        {"expand": ["Category", "Suppliers"]}
+    ),
 ]
 
 
@@ -366,3 +429,10 @@ class OdataTest(TestCase):
     def test_expand(self):
         for t in EXPAND_TEST:
             param_dict = parse_qs(t[0])
+            result = django_params(param_dict)
+            self.assertEqual(result, t[1], msg=t[0])
+
+# indexof   # TODO need to implement this function
+# replace   # TODO need to implement this function
+# substring # TODO need to implement this function
+# mod, sqrt, power
