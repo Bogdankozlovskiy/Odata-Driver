@@ -3,6 +3,7 @@ from parsimonious.grammar import Grammar
 from django.db import models
 from django.db.models import functions
 import operator
+from datetime import datetime
 
 
 class ODataException(Exception):
@@ -13,17 +14,13 @@ def django_params(param_dict):
     rv = {}
     processor = FilterProcessor()
     if '$filter' in param_dict:
-        rv.update(processor.process(param_dict['$filter'][0]))
+        rv.update(processor.process(param_dict['$filter']))
     if '$orderby' in param_dict:
-        rv.update(processor.order_by(param_dict['$orderby'][0]))
+        rv.update(processor.order_by(param_dict['$orderby']))
     if '$select' in param_dict:
-        rv.update(processor.select(param_dict['$select'][0]))
+        rv.update(processor.select(param_dict['$select']))
     if '$top' in param_dict or "$skip" in param_dict:
         rv.update(processor.get_slice(param_dict))
-    if "$expand" in param_dict:
-        rv.update(processor.expand(param_dict['$expand'][0]))
-    if "$count" in param_dict:
-        rv.update({"count": None})
     return rv
 
 
@@ -41,7 +38,8 @@ grammar = Grammar(
     number               = "-"? ~"[\d\.]+"
     string               = "'" ~"[^']+" "'"
     json_primitive       = "true" / "false" / "null"
-    function_param       = function_expr / number / string / json_primitive / select_path
+    function_param       = function_expr / number / string / datetime / json_primitive / select_path
+    datetime             = 'datetime'string
     paren_expr           = "(" ~"\s*" bool_common_expr ~"\s*" ")"
     not_expr             = 'not' RWS? bool_common_expr?
     math_marker          = 'mod' / 'div' / 'mul' / 'sub' / 'add' / 'sqrt'
@@ -51,7 +49,7 @@ grammar = Grammar(
     """
 )
 
-function_param = ['select_path', 'number', 'string', 'json_primitive']
+function_param = ['select_path', 'number', 'string', 'datetime', 'json_primitive']
 good_children = {
     'bool_common_expr': ['not_expr', 'common_expr', 'and_expr', 'or_expr'],
     'common_expr': ['paren_expr', 'function_marker_expr', 'function_expr', 'rel_expr'],
@@ -85,22 +83,18 @@ class FilterProcessor:
         for t in terms:
             term = t.strip().replace("/", "__")
             final.append(term)
-        return {"select": final}
+        return {"values": final}
 
-    def process(self, filter_text):
+    def process(self, filter_text: str):
         parsed = grammar.parse(filter_text)
         return self.bool_common_expr(parsed)
 
     @staticmethod
     def get_slice(param_dict) -> dict:
-        skip = param_dict.get("$skip") and int(param_dict.get("$skip")[0])
-        top = param_dict.get("$top") and int(param_dict.get("$top")[0])
-        return {"slice": slice(skip, top)}
-
-    @staticmethod
-    def expand(expand_param) -> dict:
-        terms = [i.strip() for i in expand_param.split(',')]
-        return {"expand": terms}
+        skip = param_dict.get("$skip") and int(param_dict.get("$skip"))
+        top = param_dict.get("$top") and int(param_dict.get("$top"))
+        top = top + skip if skip else top
+        return {"__getitem__": slice(skip, top)}
 
     @staticmethod
     def field_mapper(field):
@@ -200,6 +194,8 @@ class FilterProcessor:
             return node.text
         elif node.expr_name == "math_marker":
             return node.text
+        elif node.expr_name == "datetime":
+            return datetime.strptime(node.text, "datetime'%Y-%m-%dT%H:%M:%S'").timestamp()
         raise ODataException("unmatched primitive type '{}'".format(node.text))
 
     def basic_relation(self, fields, op, value):
@@ -219,7 +215,6 @@ class FilterProcessor:
     def basic_function(self, func_name, fields, *args, params=None):
         converter_a = {
             "contains": "contains",
-            "substringof": "contains",  # TODO substringof works works not like contains
             "endswith": "endswith",
             "startswith": "startswith",
             "length": "length",
@@ -259,6 +254,10 @@ class FilterProcessor:
                 return {"filter": functions.Concat(*params)}
             except KeyError as ke:
                 raise ODataException(f"type {ke} is not support for function concat")
+        elif func_name == "substringof":
+            token = self.field_mapper(args[0])
+            token = f"{token}__contains"
+            return {"filter": models.Q(**{token: fields})}
 
     def function_expr(self, node):
         func_name, *params = FilterProcessor.walk(node, 'function_expr')
